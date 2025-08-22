@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Abonnement requis</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="card">
+    <h2>Période d'essai terminée 🚫</h2>
+    <p>Votre essai gratuit de 7 jours est expiré. Veuillez choisir une formule d'abonnement pour continuer à utiliser RestoFlow.</p>
+    <ul>
+      <li>1 mois : XX F CFA</li>
+      <li>6 mois : XXX F CFA</li>
+      <li>5 ans : XXXX F CFA</li>
+    </ul>
+    <button onclick="payerAbonnement('1m')">Payer 1 mois</button>
+    <button onclick="payerAbonnement('6m')">Payer 6 mois</button>
+    <button onclick="payerAbonnement('5y')">Payer 5 ans</button>
+  </div>
+
+  <script>
+    function payerAbonnement(plan) {
+      alert("Simulation paiement plan: " + plan);
+      // ici on appelle l'API cinetpay pour vrai paiement puis update dans DB
+    }
+  </script>
+</body>
+</html>
