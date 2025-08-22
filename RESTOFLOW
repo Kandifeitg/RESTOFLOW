@@ -1,0 +1,1472 @@
+
+
+ 1) `package.json`
+```json
+{
+  "name": "restoflow",
+  "version": "1.1.0",
+  "description": "Logiciel offline de gestion de restaurants avec QR et CinetPay",
+  "main": "main.js",
+  "build": {
+    "appId": "com.restoflow.app",
+    "productName": "RestoFlow",
+    "files": [
+      "main.js",
+      "preload.js",
+      "backend/**/*",
+      "frontend/**/*",
+      "assets/**/*",
+      "utils/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "backend/restoflow.sqlite", "to": "backend/restoflow.sqlite" }
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "icon": "assets/restoflow.png"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "assets/restoflow.png"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "assets/restoflow.png"
+    }
+  },
+  "scripts": {
+    "start": "electron .",
+    "backend": "node backend/server.js",
+    "dev": "concurrently \"npm run backend\" \"npm start\"",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "body-parser": "^1.20.2",
+    "concurrently": "^8.2.2",
+    "cors": "^2.8.5",
+    "electron": "^29.3.0",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "node-fetch": "^3.3.2",
+    "pdfkit": "^0.13.0",
+    "qrcode": "^1.5.3",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "electron-builder": "^24.13.3"
+  }
+}
+```json
+{
+  "name": "restoflow",
+  "version": "1.0.0",
+  "description": "Logiciel offline de gestion de restaurants avec QR et CinetPay",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "backend": "node backend/server.js",
+    "dev": "concurrently \"npm run backend\" \"npm start\""
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "concurrently": "^8.2.2",
+    "cors": "^2.8.5",
+    "electron": "^29.3.0",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "pdfkit": "^0.13.0",
+    "qrcode": "^1.5.3",
+    "sqlite3": "^5.1.7",
+    "node-fetch": "^3.3.2"
+  }
+}
+```
+
+---
+
+## 2) `main.js`
+```js
+const { app, BrowserWindow } = require('electron');
+const path = require('path');
+
+// Démarre l'API locale (Express)
+require(path.join(__dirname, 'backend', 'server'));
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    backgroundColor: '#FFFFFF',
+    icon: path.join(__dirname, 'assets', 'restoflow.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  win.loadURL('http://localhost:4578/index.html');
+  // win.webContents.openDevTools(); // décommenter en dev
+}
+
+app.whenReady().then(createWindow);
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+```
+
+---
+
+## 3) `preload.js`
+```js
+// API minimaliste exposée au renderer si besoin (IPC futur)
+const { contextBridge } = require('electron');
+contextBridge.exposeInMainWorld('restoflow', { version: '1.0.0' });
+```
+
+---
+
+## 4) Backend – `backend/db.js`
+```js
+const path = require('path');
+const sqlite3 = require('sqlite3').verbose();
+const dbPath = path.join(__dirname, 'restoflow.sqlite');
+const db = new sqlite3.Database(dbPath);
+
+db.serialize(() => {
+  // Utilisateurs (auth)
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE,
+    password_hash TEXT,
+    role TEXT CHECK(role IN ('admin','owner','employee')),
+    owner_id INTEGER,
+    restaurant_id INTEGER,
+    fullname TEXT,
+    FOREIGN KEY(owner_id) REFERENCES owners(id),
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS owners (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT, email TEXT, phone TEXT
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id INTEGER, plan TEXT, start_at TEXT, end_at TEXT, status TEXT,
+    FOREIGN KEY(owner_id) REFERENCES owners(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS restaurants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id INTEGER, name TEXT, slug TEXT UNIQUE, logo TEXT,
+    cinetpay_api_key TEXT, cinetpay_site_id TEXT,
+    FOREIGN KEY(owner_id) REFERENCES owners(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS employees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER, fullname TEXT, role TEXT, login TEXT, pass TEXT,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS menu_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER, title TEXT, description TEXT, image TEXT,
+    price_normal INTEGER, price_promo INTEGER, active INTEGER DEFAULT 1,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+
+  // Stock
+  db.run(`CREATE TABLE IF NOT EXISTS stock_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER,
+    name TEXT,
+    unit TEXT,
+    qty REAL DEFAULT 0,
+    min_qty REAL DEFAULT 0,
+    linked_menu_item_id INTEGER,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id),
+    FOREIGN KEY(linked_menu_item_id) REFERENCES menu_items(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS stock_movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_item_id INTEGER,
+    type TEXT CHECK(type IN ('in','out','adjust')),
+    qty REAL,
+    reason TEXT,
+    created_at TEXT,
+    FOREIGN KEY(stock_item_id) REFERENCES stock_items(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER, table_no TEXT, customer_name TEXT, customer_phone TEXT,
+    channel TEXT, status TEXT, total INTEGER, created_at TEXT,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS order_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER, item_title TEXT, qty INTEGER, unit_price INTEGER, line_total INTEGER,
+    FOREIGN KEY(order_id) REFERENCES orders(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER, provider TEXT, method TEXT, amount INTEGER, status TEXT,
+    tx_ref TEXT, tx_id TEXT, paid_at TEXT, receipt_path TEXT,
+    FOREIGN KEY(order_id) REFERENCES orders(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS customers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER, name TEXT, email TEXT, whatsapp TEXT,
+    last_order_at TEXT, tags TEXT,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+});
+
+module.exports = db;
+```js
+const path = require('path');
+const sqlite3 = require('sqlite3').verbose();
+const dbPath = path.join(__dirname, 'restoflow.sqlite');
+const db = new sqlite3.Database(dbPath);
+
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS owners (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT, email TEXT, phone TEXT
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id INTEGER, plan TEXT, start_at TEXT, end_at TEXT, status TEXT,
+    FOREIGN KEY(owner_id) REFERENCES owners(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS restaurants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id INTEGER, name TEXT, slug TEXT UNIQUE, logo TEXT,
+    cinetpay_api_key TEXT, cinetpay_site_id TEXT,
+    FOREIGN KEY(owner_id) REFERENCES owners(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS employees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER, fullname TEXT, role TEXT, login TEXT, pass TEXT,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS menu_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER, title TEXT, description TEXT, image TEXT,
+    price_normal INTEGER, price_promo INTEGER, active INTEGER DEFAULT 1,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER, table_no TEXT, customer_name TEXT, customer_phone TEXT,
+    channel TEXT, status TEXT, total INTEGER, created_at TEXT,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS order_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER, item_title TEXT, qty INTEGER, unit_price INTEGER, line_total INTEGER,
+    FOREIGN KEY(order_id) REFERENCES orders(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER, provider TEXT, method TEXT, amount INTEGER, status TEXT,
+    tx_ref TEXT, tx_id TEXT, paid_at TEXT, receipt_path TEXT,
+    FOREIGN KEY(order_id) REFERENCES orders(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS customers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    restaurant_id INTEGER, name TEXT, email TEXT, whatsapp TEXT,
+    last_order_at TEXT, tags TEXT,
+    FOREIGN KEY(restaurant_id) REFERENCES restaurants(id)
+  )`);
+});
+
+module.exports = db;
+```
+
+---
+
+## 5) Backend – `backend/cinetpay.js`
+```js
+// Esquisse d'intégration CinetPay (à adapter avec docs et clés réelles)
+const fetch = require('node-fetch');
+
+async function initPayment({ apiKey, site_id, amount, currency, description, return_url, notify_url, customer }){
+  const res = await fetch('https://api-checkout.cinetpay.com/v2/payment', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      apikey: apiKey,
+      site_id,
+      amount,
+      currency,
+      description,
+      return_url,
+      notify_url,
+      customer_name: customer?.name || 'Client',
+      customer_phone_number: customer?.phone || '',
+      channels: 'MOBILE_MONEY,CARD'
+    })
+  });
+  return await res.json();
+}
+
+async function checkPaymentStatus({ apiKey, site_id, transaction_id }){
+  const res = await fetch('https://api-checkout.cinetpay.com/v2/payment/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apikey: apiKey, site_id, transaction_id })
+  });
+  return await res.json();
+}
+
+module.exports = { initPayment, checkPaymentStatus };
+```
+
+---
+
+## 5-bis) Backend – `backend/auth.js`
+```js
+const jwt = require('jsonwebtoken');
+const SECRET = 'restoflow-secret-offline'; // à déplacer en env si besoin
+
+function signToken(payload){
+  return jwt.sign(payload, SECRET, { expiresIn: '7d' });
+}
+
+function authMiddleware(req, res, next){
+  const h = req.headers.authorization || '';
+  const token = h.startsWith('Bearer ')? h.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Non authentifié' });
+  try { req.user = jwt.verify(token, SECRET); next(); }
+  catch(e){ return res.status(401).json({ error: 'Token invalide' }); }
+}
+
+function requireRole(roles){
+  return (req,res,next)=>{
+    if (!req.user || !roles.includes(req.user.role)) return res.status(403).json({ error: 'Accès refusé' });
+    next();
+  };
+}
+
+module.exports = { authMiddleware, requireRole, signToken };
+```
+
+---
+
+## 6) Backend – `backend/server.js`
+```js
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const multer = require('multer');
+const PDFDocument = require('pdfkit');
+const QRCode = require('qrcode');
+const db = require('./db');
+const { initPayment } = require('./cinetpay');
+const { authMiddleware, requireRole, signToken } = require('./auth');
+const bcrypt = require('bcryptjs');
+
+const app = express();
+const PORT = 4578;
+
+app.use(cors());
+app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, '..', 'frontend')));
+app.use('/receipts', express.static(path.join(__dirname, 'receipts')));
+
+// Uploads images plats
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+});
+const upload = multer({ storage });
+app.use('/uploads', express.static(uploadsDir));
+
+// ---- AUTH ----
+app.post('/api/auth/register-owner', async (req, res) => {
+  const { name, email, phone, password } = req.body;
+  const hash = await bcrypt.hash(password, 10);
+  db.run(`INSERT INTO owners(name,email,phone) VALUES(?,?,?)`, [name,email,phone], function(err){
+    if (err) return res.status(400).json({ error: err.message });
+    const owner_id = this.lastID;
+    db.run(`INSERT INTO users(email,password_hash,role,owner_id,fullname) VALUES(?,?,?,?,?)`, [email,hash,'owner',owner_id,name], function(e2){
+      if (e2) return res.status(400).json({ error: e2.message });
+      const token = signToken({ id: this.lastID, role: 'owner', owner_id });
+      res.json({ token, role: 'owner', owner_id });
+    });
+  });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  db.get(`SELECT * FROM users WHERE email = ?`, [email], async (err, user) => {
+    if (err || !user) return res.status(401).json({ error: 'Identifiants invalides' });
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Identifiants invalides' });
+    const token = signToken({ id: user.id, role: user.role, owner_id: user.owner_id, restaurant_id: user.restaurant_id });
+    res.json({ token, role: user.role, owner_id: user.owner_id, restaurant_id: user.restaurant_id });
+  });
+});
+
+// ---- RESTAURANTS ----
+app.post('/api/restaurants', authMiddleware, requireRole(['admin','owner']), (req, res) => {
+  const { owner_id, name, slug, logo, cinetpay_api_key, cinetpay_site_id } = req.body;
+  db.run(`INSERT INTO restaurants(owner_id, name, slug, logo, cinetpay_api_key, cinetpay_site_id) VALUES(?,?,?,?,?,?)`,
+    [owner_id, name, slug, logo, cinetpay_api_key, cinetpay_site_id], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      res.json({ id: this.lastID });
+    });
+});
+
+app.get('/api/restaurants/:id/qr', authMiddleware, requireRole(['admin','owner','employee']), async (req, res) => {
+  const url = `http://localhost:${PORT}/client.html?resto=${req.params.id}`;
+  try { const dataUrl = await QRCode.toDataURL(url); res.json({ url, qrcode: dataUrl }); }
+  catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// ---- MENUS ----
+app.post('/api/restaurants/:id/menu', authMiddleware, requireRole(['owner','employee','admin']), upload.single('image'), (req, res) => {
+  const rId = req.params.id;
+  const { title, description, price_normal, price_promo } = req.body;
+  const image = req.file ? `/uploads/${req.file.filename}` : null;
+  db.run(`INSERT INTO menu_items(restaurant_id, title, description, image, price_normal, price_promo) VALUES(?,?,?,?,?,?)`,
+    [rId, title, description, image, price_normal, price_promo || null], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      res.json({ id: this.lastID });
+    });
+});
+
+app.get('/api/restaurants/:id/menu', (req, res) => {
+  db.all(`SELECT * FROM menu_items WHERE restaurant_id = ? AND active = 1`, [req.params.id], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+// ---- STOCK ----
+app.post('/api/restaurants/:id/stock', authMiddleware, requireRole(['owner','employee','admin']), (req,res)=>{
+  const { name, unit, qty, min_qty, linked_menu_item_id } = req.body;
+  db.run(`INSERT INTO stock_items(restaurant_id,name,unit,qty,min_qty,linked_menu_item_id) VALUES(?,?,?,?,?,?)`,
+    [req.params.id, name, unit, qty||0, min_qty||0, linked_menu_item_id||null], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      res.json({ id: this.lastID });
+    });
+});
+
+app.get('/api/restaurants/:id/stock', authMiddleware, requireRole(['owner','employee','admin']), (req,res)=>{
+  db.all(`SELECT * FROM stock_items WHERE restaurant_id = ?`, [req.params.id], (err, rows)=>{
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.post('/api/stock/:sid/move', authMiddleware, requireRole(['owner','employee','admin']), (req,res)=>{
+  const { type, qty, reason } = req.body;
+  const created_at = new Date().toISOString();
+  db.run(`INSERT INTO stock_movements(stock_item_id,type,qty,reason,created_at) VALUES(?,?,?,?,?)`,
+    [req.params.sid, type, qty, reason||'', created_at], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      const delta = type==='in'? qty : type==='out'? -qty : 0;
+      db.run(`UPDATE stock_items SET qty = qty + ? WHERE id = ?`, [delta, req.params.sid]);
+      res.json({ id: this.lastID });
+    });
+});
+
+// ---- COMMANDES ----
+app.post('/api/orders', (req, res) => {
+  const { restaurant_id, table_no, customer_name, customer_phone, channel, items } = req.body;
+  const created_at = new Date().toISOString();
+  const total = (items||[]).reduce((s,it)=> s + (Number(it.qty) * Number(it.unit_price)), 0);
+  db.run(`INSERT INTO orders(restaurant_id, table_no, customer_name, customer_phone, channel, status, total, created_at)
+          VALUES(?,?,?,?,?,?,?,?)`,
+    [restaurant_id, table_no||null, customer_name||null, customer_phone||null, channel||'client', 'pending', total, created_at],
+    function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      const orderId = this.lastID;
+      const stmt = db.prepare(`INSERT INTO order_items(order_id, item_title, qty, unit_price, line_total) VALUES(?,?,?,?,?)`);
+      (items||[]).forEach(it => stmt.run(orderId, it.title, it.qty, it.qty*it.unit_price/it.qty, it.qty*it.unit_price));
+      stmt.finalize();
+      res.json({ order_id: orderId, total });
+    });
+});
+
+// ---- PAIEMENTS CINETPAY (init) ----
+app.post('/api/payments/init', (req, res) => {
+  const { restaurant_id, order_id, amount, currency, customer } = req.body;
+  db.get(`SELECT cinetpay_api_key, cinetpay_site_id FROM restaurants WHERE id = ?`, [restaurant_id], async (err, row) => {
+    if (err || !row) return res.status(400).json({ error: 'Clés CinetPay manquantes' });
+    try {
+      const data = await initPayment({
+        apiKey: row.cinetpay_api_key,
+        site_id: row.cinetpay_site_id,
+        amount,
+        currency: currency || 'XOF',
+        description: `Commande #${order_id}`,
+        return_url: `http://localhost:${PORT}/client.html?paid=1&order=${order_id}`,
+        notify_url: `http://localhost:${PORT}/api/payments/notify`,
+        customer
+      });
+      res.json(data);
+    } catch(e){ res.status(500).json({ error: e.message }); }
+  });
+});
+
+// ---- CONFIRMATION PAIEMENT + PDF ----
+app.post('/api/payments/confirm', (req, res) => {
+  const { order_id, provider, method, amount, tx_ref, tx_id } = req.body;
+  const paid_at = new Date().toISOString();
+  db.run(`INSERT INTO payments(order_id, provider, method, amount, status, tx_ref, tx_id, paid_at)
+          VALUES(?,?,?,?,?,?,?,?)`,
+    [order_id, provider||'cinetpay', method||'mobile_money', amount, 'paid', tx_ref||null, tx_id||null, paid_at], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+
+      const receiptsDir = path.join(__dirname, 'receipts');
+      if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir);
+      const pdfPath = path.join(receiptsDir, `receipt_${order_id}.pdf`);
+      const doc = new PDFDocument({ size: 'A4', margin: 40 });
+      const stream = fs.createWriteStream(pdfPath);
+      doc.pipe(stream);
+      doc.fontSize(20).fillColor('#27AE60').text('RestoFlow – Reçu de paiement', { align: 'center' });
+      doc.moveDown();
+      db.get(`SELECT * FROM orders WHERE id = ?`, [order_id], (e, order) => {
+        if (!order) { doc.text('Commande introuvable').end(); return; }
+        doc.fillColor('#000').fontSize(12);
+        doc.text(`Commande #${order.id}`);
+        doc.text(`Date : ${new Date(order.created_at).toLocaleString()}`);
+        doc.text(`Table/Livraison : ${order.table_no || '—'}`);
+        doc.text(`Total : ${order.total} XOF`);
+        doc.moveDown();
+        doc.text('Détails :');
+        db.all(`SELECT * FROM order_items WHERE order_id = ?`, [order_id], (e2, items) => {
+          items.forEach(it => doc.text(`- ${it.item_title} x${it.qty} = ${it.line_total} XOF`));
+          doc.moveDown();
+          doc.fillColor('#FF2E6D').text(`Paiement: ${amount} XOF via ${method || 'N/A'}`);
+          doc.fillColor('#000').text(`Transaction: ${tx_id || 'N/A'}`);
+          doc.end();
+        });
+      });
+      stream.on('finish', () => res.json({ receipt_url: `/receipts/${path.basename(pdfPath)}` }));
+    });
+});
+
+// ---- ABONNEMENTS ----
+app.post('/api/subscriptions', authMiddleware, requireRole(['admin']), (req, res) => {
+  const { owner_id, plan, start_at, end_at, status } = req.body;
+  db.run(`INSERT INTO subscriptions(owner_id, plan, start_at, end_at, status) VALUES(?,?,?,?,?)`,
+    [owner_id, plan, start_at, end_at, status], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      res.json({ id: this.lastID });
+    });
+});
+
+app.listen(PORT, () => console.log(`RestoFlow – API locale & UI: http://localhost:${PORT}`));
+```js
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const multer = require('multer');
+const PDFDocument = require('pdfkit');
+const QRCode = require('qrcode');
+const db = require('./db');
+const { initPayment } = require('./cinetpay');
+
+const app = express();
+const PORT = 4578;
+
+app.use(cors());
+app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, '..', 'frontend')));
+app.use('/receipts', express.static(path.join(__dirname, 'receipts')));
+
+// Uploads images plats
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+});
+const upload = multer({ storage });
+app.use('/uploads', express.static(uploadsDir));
+
+// --- ROUTES RESTAURANTS ---
+app.post('/api/restaurants', (req, res) => {
+  const { owner_id, name, slug, logo, cinetpay_api_key, cinetpay_site_id } = req.body;
+  db.run(`INSERT INTO restaurants(owner_id, name, slug, logo, cinetpay_api_key, cinetpay_site_id) VALUES(?,?,?,?,?,?)`,
+    [owner_id, name, slug, logo, cinetpay_api_key, cinetpay_site_id], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      res.json({ id: this.lastID });
+    });
+});
+
+app.get('/api/restaurants/:id/qr', async (req, res) => {
+  const url = `http://localhost:${PORT}/client.html?resto=${req.params.id}`;
+  try { const dataUrl = await QRCode.toDataURL(url); res.json({ url, qrcode: dataUrl }); }
+  catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// --- ROUTES MENU ---
+app.post('/api/restaurants/:id/menu', upload.single('image'), (req, res) => {
+  const rId = req.params.id;
+  const { title, description, price_normal, price_promo } = req.body;
+  const image = req.file ? `/uploads/${req.file.filename}` : null;
+  db.run(`INSERT INTO menu_items(restaurant_id, title, description, image, price_normal, price_promo) VALUES(?,?,?,?,?,?)`,
+    [rId, title, description, image, price_normal, price_promo || null], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      res.json({ id: this.lastID });
+    });
+});
+
+app.get('/api/restaurants/:id/menu', (req, res) => {
+  db.all(`SELECT * FROM menu_items WHERE restaurant_id = ? AND active = 1`, [req.params.id], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+// --- COMMANDES ---
+app.post('/api/orders', (req, res) => {
+  const { restaurant_id, table_no, customer_name, customer_phone, channel, items } = req.body;
+  const created_at = new Date().toISOString();
+  const total = (items||[]).reduce((s,it)=> s + (Number(it.qty) * Number(it.unit_price)), 0);
+  db.run(`INSERT INTO orders(restaurant_id, table_no, customer_name, customer_phone, channel, status, total, created_at)
+          VALUES(?,?,?,?,?,?,?,?)`,
+    [restaurant_id, table_no||null, customer_name||null, customer_phone||null, channel||'client', 'pending', total, created_at],
+    function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      const orderId = this.lastID;
+      const stmt = db.prepare(`INSERT INTO order_items(order_id, item_title, qty, unit_price, line_total) VALUES(?,?,?,?,?)`);
+      (items||[]).forEach(it => stmt.run(orderId, it.title, it.qty, it.unit_price, it.qty*it.unit_price));
+      stmt.finalize();
+      res.json({ order_id: orderId, total });
+    });
+});
+
+// --- PAIEMENTS CINETPAY (init) ---
+app.post('/api/payments/init', (req, res) => {
+  const { restaurant_id, order_id, amount, currency, customer } = req.body;
+  db.get(`SELECT cinetpay_api_key, cinetpay_site_id FROM restaurants WHERE id = ?`, [restaurant_id], async (err, row) => {
+    if (err || !row) return res.status(400).json({ error: 'Clés CinetPay manquantes' });
+    try {
+      const data = await initPayment({
+        apiKey: row.cinetpay_api_key,
+        site_id: row.cinetpay_site_id,
+        amount,
+        currency: currency || 'XOF',
+        description: `Commande #${order_id}`,
+        return_url: `http://localhost:${PORT}/client.html?paid=1&order=${order_id}`,
+        notify_url: `http://localhost:${PORT}/api/payments/notify`,
+        customer
+      });
+      res.json(data);
+    } catch(e){ res.status(500).json({ error: e.message }); }
+  });
+});
+
+// --- CALLBACK (webhook) CINETPAY → marquer payé et générer reçu ---
+app.post('/api/payments/confirm', (req, res) => {
+  const { order_id, provider, method, amount, tx_ref, tx_id } = req.body;
+  const paid_at = new Date().toISOString();
+  db.run(`INSERT INTO payments(order_id, provider, method, amount, status, tx_ref, tx_id, paid_at)
+          VALUES(?,?,?,?,?,?,?,?)`,
+    [order_id, provider||'cinetpay', method||'mobile_money', amount, 'paid', tx_ref||null, tx_id||null, paid_at], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+
+      // Générer PDF
+      const receiptsDir = path.join(__dirname, 'receipts');
+      if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir);
+      const pdfPath = path.join(receiptsDir, `receipt_${order_id}.pdf`);
+      const doc = new PDFDocument({ size: 'A4', margin: 40 });
+      const stream = fs.createWriteStream(pdfPath);
+      doc.pipe(stream);
+
+      // En-tête
+      doc.fontSize(20).fillColor('#27AE60').text('RestoFlow – Reçu de paiement', { align: 'center' });
+      doc.moveDown();
+
+      db.get(`SELECT * FROM orders WHERE id = ?`, [order_id], (e, order) => {
+        if (!order) { doc.text('Commande introuvable').end(); return; }
+        doc.fillColor('#000').fontSize(12);
+        doc.text(`Commande #${order.id}`);
+        doc.text(`Date : ${new Date(order.created_at).toLocaleString()}`);
+        doc.text(`Table/Livraison : ${order.table_no || '—'}`);
+        doc.text(`Total : ${order.total} XOF`);
+        doc.moveDown();
+        doc.text('Détails :');
+        db.all(`SELECT * FROM order_items WHERE order_id = ?`, [order_id], (e2, items) => {
+          items.forEach(it => doc.text(`- ${it.item_title} x${it.qty} = ${it.line_total} XOF`));
+          doc.moveDown();
+          doc.fillColor('#FF2E6D').text(`Paiement: ${amount} XOF via ${method || 'N/A'}`);
+          doc.fillColor('#000').text(`Transaction: ${tx_id || 'N/A'}`);
+          doc.end();
+        });
+      });
+
+      stream.on('finish', () => res.json({ receipt_url: `/receipts/${path.basename(pdfPath)}` }));
+    });
+});
+
+// --- ABONNEMENTS ---
+app.post('/api/subscriptions', (req, res) => {
+  const { owner_id, plan, start_at, end_at, status } = req.body;
+  db.run(`INSERT INTO subscriptions(owner_id, plan, start_at, end_at, status) VALUES(?,?,?,?,?)`,
+    [owner_id, plan, start_at, end_at, status], function(err){
+      if (err) return res.status(400).json({ error: err.message });
+      res.json({ id: this.lastID });
+    });
+});
+
+app.listen(PORT, () => console.log(`RestoFlow – API locale & UI: http://localhost:${PORT}`));
+```
+
+---
+
+## 7) Frontend – `frontend/styles.css`
+```css
+:root {
+  --rf-bg: #FFFFFF;
+  --rf-green: #27AE60;
+  --rf-pink: #FF2E6D;
+  --rf-dark: #111827;
+}
+* { box-sizing: border-box; }
+body { font-family: Arial, Helvetica, sans-serif; background: var(--rf-bg); color: #333; margin: 0; }
+header { background: var(--rf-pink); color: #fff; padding: 14px; display:flex; align-items:center; gap:12px }
+header img { height: 36px; }
+nav a { color:#fff; margin-right:12px; text-decoration:none; font-weight:bold }
+.container { padding: 16px; }
+.card { background:#fff; border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,.06); padding:16px; margin-bottom:16px }
+.btn { background: var(--rf-green); color:#fff; border:0; border-radius:8px; padding:10px 14px; cursor:pointer }
+.btn.secondary { background: var(--rf-pink); }
+input, select { padding:10px; border:1px solid #ddd; border-radius:8px; width:100%; margin:6px 0 }
+.grid { display:grid; gap:14px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.badge { display:inline-block; background:#f1f5f9; padding:4px 8px; border-radius:999px }
+.footer { text-align:center; padding:20px; color:#666 }
+```
+
+---
+
+## 8) Frontend – `frontend/app.js`
+```js
+// utilitaires front communs
+function $(sel){ return document.querySelector(sel); }
+function $all(sel){ return document.querySelectorAll(sel); }
+
+function getToken(){ return localStorage.getItem('rf_token'); }
+function setToken(t){ localStorage.setItem('rf_token', t); }
+function authHeaders(){ const t=getToken(); return t? { 'Authorization': 'Bearer '+t } : {}; }
+
+async function postJSON(url, data){
+  const r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json', ...authHeaders() }, body: JSON.stringify(data) });
+  return await r.json();
+}
+async function getJSON(url){ const r = await fetch(url, { headers: authHeaders() }); return await r.json(); }
+
+function requireAuth(){ if (!getToken()) location.href='login.html'; }
+```
+js
+// utilitaires front communs
+function $(sel){ return document.querySelector(sel); }
+function $all(sel){ return document.querySelectorAll(sel); }
+
+async function postJSON(url, data){
+  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  return await r.json();
+}
+```
+
+---
+
+## 9) Frontend – `frontend/index.html`
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RestoFlow – Accueil</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <img src="../assets/restoflow.png" alt="logo" />
+  <nav>
+    <a href="login.html">Connexion</a>
+    <a href="admin.html">Admin SaaS</a>
+    <a href="proprietaire.html">Propriétaire</a>
+    <a href="employe.html">Employé</a>
+  </nav>
+</header>
+<div class="container">
+  <div class="card">
+    <h2>Bienvenue sur RestoFlow</h2>
+    <p>Connectez-vous pour accéder aux interfaces Admin/Propriétaire/Employé. L'interface client est accessible via un QR spécifique au restaurant.</p>
+  </div>
+</div>
+<div class="footer">© RestoFlow</div>
+</body>
+</html>
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RestoFlow – Accueil</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header>
+  <img src="../assets/restoflow.png" alt="logo" />
+  <nav>
+    <a href="admin.html">Admin SaaS</a>
+    <a href="proprietaire.html">Propriétaire</a>
+    <a href="employe.html">Employé</a>
+  </nav>
+</header>
+<div class="container">
+  <div class="card">
+    <h2>Bienvenue sur RestoFlow</h2>
+    <p>Choisissez une interface ci-dessus. L'interface client est accessible via un QR spécifique au restaurant.</p>
+  </div>
+</div>
+<div class="footer">© RestoFlow</div>
+</body>
+</html>
+```
+
+---
+
+## 10) Frontend – `frontend/admin.html`
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin SaaS – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body onload="requireAuth()">
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Assigner un abonnement</h2>
+    <label>ID Propriétaire</label>
+    <input id="ownerId" placeholder="ex: 1"/>
+    <label>Plan</label>
+    <select id="plan"><option value="1m">1 mois</option><option value="6m">6 mois</option><option value="5y">5 ans</option></select>
+    <button class="btn" id="assign">Assigner</button>
+    <div id="out" style="margin-top:8px"></div>
+  </div>
+</div>
+<script>
+  const mapDays = { '1m': 30, '6m': 180, '5y': 1825 };
+  $('#assign').onclick = async () => {
+    const owner_id = Number($('#ownerId').value||1);
+    const plan = $('#plan').value;
+    const start = new Date();
+    const end = new Date(); end.setDate(end.getDate()+mapDays[plan]);
+    const res = await postJSON('/api/subscriptions', { owner_id, plan, start_at: start.toISOString(), end_at: end.toISOString(), status: 'active' });
+    $('#out').textContent = JSON.stringify(res);
+  };
+</script>
+</body>
+</html>
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin SaaS – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body>
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Assigner un abonnement</h2>
+    <label>ID Propriétaire</label>
+    <input id="ownerId" placeholder="ex: 1"/>
+    <label>Plan</label>
+    <select id="plan"><option value="1m">1 mois</option><option value="6m">6 mois</option><option value="5y">5 ans</option></select>
+    <button class="btn" id="assign">Assigner</button>
+    <div id="out" style="margin-top:8px"></div>
+  </div>
+</div>
+<script>
+  const mapDays = { '1m': 30, '6m': 180, '5y': 1825 };
+  $('#assign').onclick = async () => {
+    const owner_id = Number($('#ownerId').value||1);
+    const plan = $('#plan').value;
+    const start = new Date();
+    const end = new Date(); end.setDate(end.getDate()+mapDays[plan]);
+    const res = await postJSON('/api/subscriptions', { owner_id, plan, start_at: start.toISOString(), end_at: end.toISOString(), status: 'active' });
+    $('#out').textContent = JSON.stringify(res);
+  };
+</script>
+</body>
+</html>
+```
+
+---
+
+## 11) Frontend – `frontend/proprietaire.html`
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Propriétaire – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body onload="requireAuth()">
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a> <a href="employe.html">Employé</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Créer un restaurant</h2>
+    <div class="grid">
+      <div>
+        <label>ID Propriétaire</label>
+        <input id="owner_id" placeholder="ex: 1"/>
+      </div>
+      <div>
+        <label>Nom</label>
+        <input id="r_name"/>
+      </div>
+      <div>
+        <label>Slug (unique)</label>
+        <input id="r_slug"/>
+      </div>
+      <div>
+        <label>Logo (URL)</label>
+        <input id="r_logo" placeholder="/uploads/logo.png"/>
+      </div>
+      <div>
+        <label>CinetPay API Key</label>
+        <input id="r_ckey"/>
+      </div>
+      <div>
+        <label>CinetPay Site ID</label>
+        <input id="r_csite"/>
+      </div>
+    </div>
+    <button class="btn" id="btnCreateR">Enregistrer</button>
+    <div id="r_out"></div>
+  </div>
+
+  <div class="card">
+    <h2>QR code du restaurant</h2>
+    <label>ID Restaurant</label>
+    <input id="qr_rid" placeholder="ex: 1"/>
+    <button class="btn secondary" id="btnQR">Générer QR</button>
+    <div id="qr_zone" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Ajouter un plat (image + prix normal/promo)</h2>
+    <form id="formMenu" enctype="multipart/form-data">
+      <label>ID Restaurant</label>
+      <input name="rid" placeholder="ex: 1"/>
+      <label>Image</label>
+      <input name="image" type="file"/>
+      <label>Titre</label>
+      <input name="title"/>
+      <label>Description</label>
+      <input name="description"/>
+      <label>Prix normal (XOF)</label>
+      <input name="price_normal" type="number"/>
+      <label>Prix promo (XOF)</label>
+      <input name="price_promo" type="number"/>
+      <button class="btn">Ajouter</button>
+    </form>
+    <div id="m_out"></div>
+  </div>
+
+  <div class="card">
+    <h2>Stock</h2>
+    <div class="grid">
+      <div><label>ID resto</label><input id="s_rid"/></div>
+      <div><label>Nom article</label><input id="s_name"/></div>
+      <div><label>Unité (kg, pcs, L…)</label><input id="s_unit"/></div>
+      <div><label>Quantité initiale</label><input id="s_qty" type="number"/></div>
+      <div><label>Seuil min</label><input id="s_min" type="number"/></div>
+    </div>
+    <button class="btn" id="s_add">Ajouter au stock</button>
+    <div id="s_out" style="margin-top:6px"></div>
+  </div>
+</div>
+<script>
+  $('#btnCreateR').onclick = async () => {
+    const payload = { owner_id: Number($('#owner_id').value||1), name: $('#r_name').value, slug: $('#r_slug').value, logo: $('#r_logo').value, cinetpay_api_key: $('#r_ckey').value, cinetpay_site_id: $('#r_csite').value };
+    const res = await postJSON('/api/restaurants', payload);
+    $('#r_out').textContent = JSON.stringify(res);
+  };
+  $('#btnQR').onclick = async () => {
+    const id = $('#qr_rid').value; const r = await fetch(`/api/restaurants/${id}/qr`, { headers: authHeaders() }); const d = await r.json();
+    $('#qr_zone').innerHTML = `<p>URL Client: <b>${d.url}</b></p><img src="${d.qrcode}" width="160">`;
+  };
+  const form = document.getElementById('formMenu');
+  form.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const fd = new FormData(form);
+    const rid = fd.get('rid'); fd.delete('rid');
+    const res = await fetch(`/api/restaurants/${rid}/menu`, { method:'POST', headers: authHeaders(), body: fd });
+    $('#m_out').textContent = JSON.stringify(await res.json());
+  });
+  $('#s_add').onclick = async ()=>{
+    const res = await postJSON(`/api/restaurants/${$('#s_rid').value}/stock`, { name: $('#s_name').value, unit: $('#s_unit').value, qty: Number($('#s_qty').value||0), min_qty: Number($('#s_min').value||0) });
+    $('#s_out').textContent = JSON.stringify(res);
+  };
+</script>
+</body>
+</html>
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Propriétaire – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body>
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a> <a href="employe.html">Employé</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Créer un restaurant</h2>
+    <div class="grid">
+      <div>
+        <label>ID Propriétaire</label>
+        <input id="owner_id" placeholder="ex: 1"/>
+      </div>
+      <div>
+        <label>Nom</label>
+        <input id="r_name"/>
+      </div>
+      <div>
+        <label>Slug (unique)</label>
+        <input id="r_slug"/>
+      </div>
+      <div>
+        <label>Logo (URL)</label>
+        <input id="r_logo" placeholder="/uploads/logo.png"/>
+      </div>
+      <div>
+        <label>CinetPay API Key</label>
+        <input id="r_ckey"/>
+      </div>
+      <div>
+        <label>CinetPay Site ID</label>
+        <input id="r_csite"/>
+      </div>
+    </div>
+    <button class="btn" id="btnCreateR">Enregistrer</button>
+    <div id="r_out"></div>
+  </div>
+
+  <div class="card">
+    <h2>QR code du restaurant</h2>
+    <label>ID Restaurant</label>
+    <input id="qr_rid" placeholder="ex: 1"/>
+    <button class="btn secondary" id="btnQR">Générer QR</button>
+    <div id="qr_zone" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Ajouter un plat (image + prix normal/promo)</h2>
+    <form id="formMenu" enctype="multipart/form-data">
+      <label>ID Restaurant</label>
+      <input name="rid" placeholder="ex: 1"/>
+      <label>Image</label>
+      <input name="image" type="file"/>
+      <label>Titre</label>
+      <input name="title"/>
+      <label>Description</label>
+      <input name="description"/>
+      <label>Prix normal (XOF)</label>
+      <input name="price_normal" type="number"/>
+      <label>Prix promo (XOF)</label>
+      <input name="price_promo" type="number"/>
+      <button class="btn">Ajouter</button>
+    </form>
+    <div id="m_out"></div>
+  </div>
+</div>
+<script>
+  $('#btnCreateR').onclick = async () => {
+    const payload = { owner_id: Number($('#owner_id').value||1), name: $('#r_name').value, slug: $('#r_slug').value, logo: $('#r_logo').value, cinetpay_api_key: $('#r_ckey').value, cinetpay_site_id: $('#r_csite').value };
+    const res = await postJSON('/api/restaurants', payload);
+    $('#r_out').textContent = JSON.stringify(res);
+  };
+  $('#btnQR').onclick = async () => {
+    const id = $('#qr_rid').value; const r = await fetch(`/api/restaurants/${id}/qr`); const d = await r.json();
+    $('#qr_zone').innerHTML = `<p>URL Client: <b>${d.url}</b></p><img src="${d.qrcode}" width="160">`;
+  };
+  const form = document.getElementById('formMenu');
+  form.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const fd = new FormData(form);
+    const rid = fd.get('rid'); fd.delete('rid');
+    const res = await fetch(`/api/restaurants/${rid}/menu`, { method:'POST', body: fd });
+    $('#m_out').textContent = JSON.stringify(await res.json());
+  });
+</script>
+</body>
+</html>
+```
+
+---
+
+## 12) Frontend – `frontend/employe.html`
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Employé – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body onload="requireAuth()">
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Enregistrer une vente manuelle</h2>
+    <div class="grid">
+      <div><label>ID resto</label><input id="rid"/></div>
+      <div><label>Nom du plat</label><input id="titre"/></div>
+      <div><label>Qté</label><input id="qty" type="number" value="1"/></div>
+      <div><label>Prix (XOF)</label><input id="prix" type="number"/></div>
+      <div><label>Moyen</label>
+        <select id="moyen"><option>espèces</option><option>mobile_money</option><option>carte</option></select>
+      </div>
+      <div><label>Client (optionnel)</label><input id="client"/></div>
+    </div>
+    <button class="btn" id="save">Enregistrer</button>
+    <div id="res" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Mouvement de stock</h2>
+    <div class="grid">
+      <div><label>ID article stock</label><input id="sid"/></div>
+      <div><label>Type</label><select id="stype"><option value="in">Entrée</option><option value="out">Sortie</option><option value="adjust">Ajustement</option></select></div>
+      <div><label>Quantité</label><input id="sqty" type="number"/></div>
+      <div><label>Motif</label><input id="sreason"/></div>
+    </div>
+    <button class="btn" id="sbtn">Valider</button>
+    <div id="sres"></div>
+  </div>
+</div>
+<script>
+  $('#save').onclick = async () => {
+    const restaurant_id = Number($('#rid').value);
+    const items = [{ title: $('#titre').value, qty: Number($('#qty').value||1), unit_price: Number($('#prix').value||0) }];
+    const order = await postJSON('/api/orders', { restaurant_id, channel:'manuel', items });
+    const pay = await postJSON('/api/payments/confirm', { order_id: order.order_id, provider:'offline', method: $('#moyen').value, amount: order.total });
+    $('#res').innerHTML = `Vente enregistrée. Reçu: <a href="${pay.receipt_url}" target="_blank">ouvrir</a>`;
+  };
+  $('#sbtn').onclick = async ()=>{
+    const res = await postJSON(`/api/stock/${$('#sid').value}/move`, { type: $('#stype').value, qty: Number($('#sqty').value||0), reason: $('#sreason').value });
+    $('#sres').textContent = JSON.stringify(res);
+  };
+</script>
+</body>
+</html>
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Employé – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body>
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Enregistrer une vente manuelle</h2>
+    <div class="grid">
+      <div><label>ID resto</label><input id="rid"/></div>
+      <div><label>Nom du plat</label><input id="titre"/></div>
+      <div><label>Qté</label><input id="qty" type="number" value="1"/></div>
+      <div><label>Prix (XOF)</label><input id="prix" type="number"/></div>
+      <div><label>Moyen</label>
+        <select id="moyen"><option>espèces</option><option>mobile_money</option><option>carte</option></select>
+      </div>
+      <div><label>Client (optionnel)</label><input id="client"/></div>
+    </div>
+    <button class="btn" id="save">Enregistrer</button>
+    <div id="res" style="margin-top:8px"></div>
+  </div>
+</div>
+<script>
+  $('#save').onclick = async () => {
+    const restaurant_id = Number($('#rid').value);
+    const items = [{ title: $('#titre').value, qty: Number($('#qty').value||1), unit_price: Number($('#prix').value||0) }];
+    const order = await postJSON('/api/orders', { restaurant_id, channel:'manuel', items });
+    const pay = await postJSON('/api/payments/confirm', { order_id: order.order_id, provider:'offline', method: $('#moyen').value, amount: order.total });
+    $('#res').innerHTML = `Vente enregistrée. Reçu: <a href="${pay.receipt_url}" target="_blank">ouvrir</a>`;
+  };
+</script>
+</body>
+</html>
+```
+
+---
+
+## 13) Frontend – `frontend/client.html`
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Client – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>.menu{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}.card{text-align:center} .card img{width:100%;height:140px;object-fit:cover;border-radius:10px} .panier{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:3px solid var(--rf-pink);padding:10px;display:flex;justify-content:space-between;align-items:center}</style>
+  <script src="app.js" defer></script>
+</head>
+<body>
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Menu</h2>
+    <div id="info"></div>
+    <div id="menu" class="menu"></div>
+  </div>
+</div>
+<div class="panier"><span id="total">Total : 0 XOF</span><button class="btn" id="payer">Payer (CinetPay)</button></div>
+<script>
+  const qs = new URLSearchParams(location.search);
+  const resto = qs.get('resto');
+  const tableNo = qs.get('table') || '—';
+  $('#info').innerHTML = `<span class="badge">Table: ${tableNo}</span>`;
+
+  let CART = []; let TOTAL = 0;
+
+  (async function loadMenu(){
+    const r = await fetch(`/api/restaurants/${resto}/menu`);
+    const items = await r.json();
+    const grid = $('#menu'); grid.innerHTML = '';
+    items.forEach(it => {
+      const price = it.price_promo && Number(it.price_promo) > 0 ? Number(it.price_promo) : Number(it.price_normal);
+      const card = document.createElement('div'); card.className='card';
+      card.innerHTML = `<img src="${it.image||''}"><h3>${it.title}</h3><div>${it.description||''}</div><div><b>${price} XOF</b> ${it.price_promo?`<del>${it.price_normal}</del>`:''}</div><button class='btn'>Ajouter</button>`;
+      card.querySelector('button').onclick = ()=>{ CART.push({title: it.title, qty:1, unit_price: price}); TOTAL += price; $('#total').textContent = `Total : ${TOTAL} XOF`; };
+      grid.appendChild(card);
+    });
+  })();
+
+  $('#payer').onclick = async () => {
+    if (!CART.length) return alert('Panier vide');
+    const order = await postJSON('/api/orders', { restaurant_id: Number(resto), table_no: tableNo, channel:'client', items: CART });
+    const pay = await postJSON('/api/payments/init', { restaurant_id: Number(resto), order_id: order.order_id, amount: order.total, currency:'XOF', customer:{} });
+    if (pay.payment_url) { location.href = pay.payment_url; } else { alert('Init paiement échouée'); }
+  };
+</script>
+</body>
+</html>
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Client – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>.menu{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}.card{text-align:center} .card img{width:100%;height:140px;object-fit:cover;border-radius:10px} .panier{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:3px solid var(--rf-pink);padding:10px;display:flex;justify-content:space-between;align-items:center}</style>
+  <script src="app.js" defer></script>
+</head>
+<body>
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Menu</h2>
+    <div id="info"></div>
+    <div id="menu" class="menu"></div>
+  </div>
+</div>
+<div class="panier"><span id="total">Total : 0 XOF</span><button class="btn" id="payer">Payer (CinetPay)</button></div>
+<script>
+  const qs = new URLSearchParams(location.search);
+  const resto = qs.get('resto');
+  const tableNo = qs.get('table') || '—';
+  $('#info').innerHTML = `<span class="badge">Table: ${tableNo}</span>`;
+
+  let CART = []; let TOTAL = 0;
+
+  (async function loadMenu(){
+    const r = await fetch(`/api/restaurants/${resto}/menu`);
+    const items = await r.json();
+    const grid = $('#menu'); grid.innerHTML = '';
+    items.forEach(it => {
+      const price = it.price_promo && Number(it.price_promo) > 0 ? Number(it.price_promo) : Number(it.price_normal);
+      const card = document.createElement('div'); card.className='card';
+      card.innerHTML = `<img src="${it.image||''}"><h3>${it.title}</h3><div>${it.description||''}</div><div><b>${price} XOF</b> ${it.price_promo?`<del>${it.price_normal}</del>`:''}</div><button class='btn'>Ajouter</button>`;
+      card.querySelector('button').onclick = ()=>{ CART.push({title: it.title, qty:1, unit_price: price}); TOTAL += price; $('#total').textContent = `Total : ${TOTAL} XOF`; };
+      grid.appendChild(card);
+    });
+  })();
+
+  $('#payer').onclick = async () => {
+    if (!CART.length) return alert('Panier vide');
+    const order = await postJSON('/api/orders', { restaurant_id: Number(resto), table_no: tableNo, channel:'client', items: CART });
+    const pay = await postJSON('/api/payments/init', { restaurant_id: Number(resto), order_id: order.order_id, amount: order.total, currency:'XOF', customer:{} });
+    if (pay.payment_url) { location.href = pay.payment_url; } else { alert('Init paiement échouée'); }
+  };
+</script>
+</body>
+</html>
+```
+
+---
+
+## 14) Frontend – `frontend/login.html`
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Connexion – RestoFlow</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body>
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a></nav></header>
+<div class="container">
+  <div class="card">
+    <h2>Connexion</h2>
+    <label>Email</label>
+    <input id="lemail" type="email"/>
+    <label>Mot de passe</label>
+    <input id="lpass" type="password"/>
+    <button class="btn" id="lbtn">Se connecter</button>
+    <div id="lout"></div>
+  </div>
+  <div class="card">
+    <h3>Créer un compte propriétaire</h3>
+    <label>Nom</label><input id="rname"/>
+    <label>Email</label><input id="remail" type="email"/>
+    <label>Téléphone</label><input id="rphone"/>
+    <label>Mot de passe</label><input id="rpass" type="password"/>
+    <button class="btn secondary" id="rbtn">Créer</button>
+    <div id="rout"></div>
+  </div>
+</div>
+<script>
+  $('#lbtn').onclick = async ()=>{
+    const res = await postJSON('/api/auth/login', { email: $('#lemail').value, password: $('#lpass').value });
+    if (res.token){ setToken(res.token); $('#lout').textContent = 'Connecté'; location.href='index.html'; }
+    else $('#lout').textContent = res.error || 'Erreur';
+  };
+  $('#rbtn').onclick = async ()=>{
+    const res = await postJSON('/api/auth/register-owner', { name: $('#rname').value, email: $('#remail').value, phone: $('#rphone').value, password: $('#rpass').value });
+    if (res.token){ setToken(res.token); $('#rout').textContent = 'Compte créé'; }
+    else $('#rout').textContent = res.error || 'Erreur';
+  };
+</script>
+</body>
+</html>
+```
+
+## 15) Utils – `utils/pdfGenerator.js`
+```js
+// réservé pour extensions futures (si besoin d'usage hors route /api)
+```
+
+## 16) Utils – `utils/qrGenerator.js`
+```js
+// réservé pour extensions futures (helpers QR)
+```
+
+---
+
+## 17) Installation & Lancementjs
+// réservé pour extensions futures (si besoin d'usage hors route /api)
+```
+
+## 15) Utils – `utils/qrGenerator.js`
+```js
+// réservé pour extensions futures (helpers QR)
+```
+
+---
+
+## 17) Installation & Lancement
+```bash
+# 1) Installer les dépendances
+npm install
+
+# 2) Démarrer en mode dev (API + app Electron)
+npm run dev
+
+# Tests rapides:
+# - Ouvrir http://localhost:4578/login.html
+# - Créer un propriétaire, se connecter, créer un restaurant, générer QR, ajouter des plats
+# - Employé: ventes manuelles + reçu PDF
+# - Client: panier + CinetPay (init)
+```
+
+---
+
+## 18) Packaging – Installeur Windows/Mac/Linux
+```bash
+# Générer un build local dans le dossier dist/
+npm run dist
+
+# Windows: crée un .exe (NSIS)
+# macOS: crée un .dmg/.app
+# Linux: AppImage
+```
+**Notes packaging**
+- L’icône utilise `assets/restoflow.png`. Tu peux fournir un `.ico`/`.icns` pour un rendu natif.
+- `extraResources` embarque la base `backend/restoflow.sqlite`.
+- Pour mise à jour future, on pourra activer auto-updater, mais hors-scope offline.
+
+---
+
+## 19) Rôles & Sécurité (récap)
+- **admin** : gérer abonnements, créer restos.
+- **owner** : créer/éditer ses restaurants, menus, stock.
+- **employee** : ventes manuelles, mouvements de stock.
+- **client** : accès menu public + paiement (pas de token).
+
+Toutes les routes sensibles exigent `Authorization: Bearer <token>`.
+
