@@ -1,0 +1,47 @@
+package.json`
+"pack": "electron-builder --dir",
+"dist": "electron-builder"
+},
+"dependencies": {
+"bcryptjs": "^2.4.3",
+"body-parser": "^1.20.2",
+"concurrently": "^8.2.2",
+"cors": "^2.8.5",
+"electron": "^29.3.0",
+"express": "^4.19.2",
+"jsonwebtoken": "^9.0.2",
+"multer": "^1.4.5-lts.1",
+"node-fetch": "^3.3.2",
+"pdfkit": "^0.13.0",
+"qrcode": "^1.5.3",
+"sqlite3": "^5.1.7"
+},
+"devDependencies": {
+"electron-builder": "^24.13.3"
+}
+}
+```json
+{
+"name": "restoflow",
+"version": "1.0.0",
+"description": "Logiciel offline de gestion de restaurants avec QR et CinetPay",
+"main": "main.js",
+"scripts": {
+"start": "electron .",
+"backend": "node backend/server.js",
+"dev": "concurrently \"npm run backend\" \"npm start\""
+},
+"dependencies": {
+"body-parser": "^1.20.2",
+"concurrently": "^8.2.2",
+"cors": "^2.8.5",
+"electron": "^29.3.0",
+"express": "^4.19.2",
+"multer": "^1.4.5-lts.1",
+"pdfkit": "^0.13.0",
+"qrcode": "^1.5.3",
+"sqlite3": "^5.1.7",
+"node-fetch": "^3.3.2"
+}
+}
+```
