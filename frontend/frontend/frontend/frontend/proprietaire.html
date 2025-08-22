@@ -1,0 +1,56 @@
+```html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Propriétaire – RestoFlow</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="app.js" defer></script>
+</head>
+<body onload="requireAuth()">
+<header><img src="../assets/restoflow.png"><nav><a href="index.html">Accueil</a> <a href="employe.html">Employé</a></nav></header>
+<div class="container">
+<div class="card">
+<h2>Créer un restaurant</h2>
+<div class="grid">
+<div>
+<label>ID Propriétaire</label>
+<input id="owner_id" placeholder="ex: 1"/>
+</div>
+<div>
+<label>Nom</label>
+<input id="r_name"/>
+</div>
+<div>
+<label>Slug (unique)</label>
+<input id="r_slug"/>
+</div>
+<div>
+<label>Logo (URL)</label>
+<input id="r_logo" placeholder="/uploads/logo.png"/>
+</div>
+<div>
+<label>CinetPay API Key</label>
+<input id="r_ckey"/>
+</div>
+<div>
+<label>CinetPay Site ID</label>
+<input id="r_csite"/>
+</div>
+</div>
+<button class="btn" id="btnCreateR">Enregistrer</button>
+<div id="r_out"></div>
+</div>
+
+
+<div class="card">
+<h2>QR code du restaurant</h2>
+<label>ID Restaurant</label>
+<input id="qr_rid" placeholder="ex: 1"/>
+<button class="btn secondary" id="btnQR">Générer QR</button>
+<div id="qr_zone" style="margin-top:10px"></div>
+</div>
+
+
+$('#m_out
